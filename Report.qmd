@@ -1,0 +1,2690 @@
+---
+title: "Report"
+author: "Marco Aurelio Hoegen Martins"
+format: 
+  html:
+    fig-responsive: true
+editor: visual
+execute: 
+  echo: false
+---
+
+```{r libraries, results='hide', warning=FALSE, message=FALSE, include=FALSE}
+
+# This has a different syntax
+if (!require(rnaturalearthhires)) {
+  if (!require(renv)) {
+    install.packages("renv")
+  }
+  renv::install("rnaturalearth", )
+}
+
+# libraries
+required_libraries <- c(
+  "tidyverse",
+  "dplyr",
+  "sf",
+  "renv",
+  "rnaturalearth",
+  "Hmisc",
+  "ggtext"
+)
+
+# install each one of these
+for(lib in required_libraries){
+  if(!requireNamespace(lib, quietly = TRUE)){
+    install.packages(lib)
+  }
+  library(lib, character.only = TRUE)
+}
+
+# Doesn't take up much space but it visually pollutes my list of variables and data frames
+rm(required_libraries)
+rm(lib)
+```
+
+## Loading and cleaning data
+
+The code will not appear on the .html file, but it is hopefully well-commented enough to explain what I'm doing.
+
+#### Datasets
+
+The original datasets in this report can be found both in the "Data" folder as in the World Bank and the OECD's websites and they're linked below.
+
+[TFR table (World Bank)](https://data.worldbank.org/indicator/SP.DYN.TFRT.IN)
+
+[Labour participation (World Bank)](https://genderdata.worldbank.org/en/indicator/sl-tlf-acti-zs)
+
+[Schooling (World Bank)](https://genderdata.worldbank.org/en/indicator/se-sch-life)
+
+[Wage gap (OECD)](https://data-explorer.oecd.org/vis?df%5Bds%5D=dsDisseminateFinalDMZ&df%5Bid%5D=DSD_EARNINGS%40GENDER_WAGE_GAP&df%5Bag%5D=OECD.ELS.SAE&df%5Bvs%5D=&pd=1973%2C2023&dq=.....MEDIAN._T&to%5BTIME_PERIOD%5D=false&vw=tb)
+
+[GDP per capita (World bank)](https://databank.worldbank.org/indicator/NY.GDP.PCAP.CD/1ff4a498/Popular-Indicators)
+
+```{r loading_main_tfr_table}
+# First, the data relative to total fertility rate;
+
+# The first four lines aren't actual data
+tfr_raw <- read.table(
+  file = file.path("Data","Total fertility rate, UN","API_SP.DYN.TFRT.IN_DS2_en_csv_v2_821.csv"), 
+  sep = ",",
+  skip = 4,
+  header = T,
+  check.names = F)
+
+
+# We now have a problem; our dataframe doesn't follow tidy conventions; We, therefore, must make it tidy
+
+# Remove the empty column
+tfr_raw <- tfr_raw[, colnames(tfr_raw) != ""]
+
+# Pivoting it longer so it has a different row for each observation
+tfr_raw <- pivot_longer(
+  data = tfr_raw, 
+  cols = matches("^\\d+$"),
+  names_to = "year",
+  values_to = "fertility_rate"
+  ) %>%
+  mutate(
+    year = as.numeric(year),
+    )%>%
+  na.omit()
+  
+# Now we can plot and play with it.
+
+```
+
+```{r loading_world_bank_metadata}
+# Now, let's load the metadata for region definitions
+tfr_meta <- read.csv(
+  file = file.path("Data","Total fertility rate, UN","Metadata_Country_API_SP.DYN.TFRT.IN_DS2_en_csv_v2_821.csv"), 
+  sep = ",",
+  header = T,
+  check.names = F
+  )
+tfr_meta <- tfr_meta[,colnames(tfr_meta) != ""]
+
+# We can mutate tfr_meta so put region names to the country codes without "regions" (because they are regions themselves)
+
+tfr_meta <- tfr_meta %>%
+  select(`Country Code`, Region, TableName) %>%
+  mutate(Region = if_else(is.na(Region) | Region == "", TableName, Region))
+
+# Now we can add the region as a column on the original tfr table
+tfr_raw <- left_join(tfr_raw, select(tfr_meta,"Country Code", Region), by = "Country Code")
+```
+
+```{r loading_labour_participation}
+# Now, let's load the gender equality data
+# First, participation in the labour market
+df_labour_participation <- read.csv(
+  file = file.path(
+    "Data",
+    "Labour force participation rate of population, UN",
+    "Labor force participation rate (% of population) .csv"), 
+  sep = ",",
+  header = T,
+  check.names = F
+  ) %>%
+  filter( # For the sake of consistency, we're going to use the modeled ILO estimate instead of the national estimate. We're also using the 15-64 number, as we don't expect people 65+ to be having many children.
+    str_detect(
+      `Indicator Name`,
+      "population ages 15-64"
+      )
+    ) %>% 
+  pivot_wider(# Now I'm pivoting wider to make my calculation of the proportion between men and women easier.
+    id_cols = c(`Country Code`, Year),
+    names_from = Disaggregation,
+    values_from = Value
+  ) %>%
+  mutate(
+    labour_female_male_ratio = `female, Modeled, 15-64`/`male, Modeled, 15-64`
+  )
+```
+
+```{r loading_schooling}
+# Now, we do basically the same for expected years of schooling
+df_expected_schooling <- read.csv(
+  file = file.path(
+    "Data",
+    "Years of schooling, UN",
+    "Expected years of schooling.csv"), 
+  sep = ",",
+  header = T,
+  check.names = F
+  ) %>%
+  pivot_wider(
+    id_cols = c(`Country Code`, Year),
+    names_from = Disaggregation,
+    values_from = Value
+  ) %>%
+  mutate(
+    schooling_female_male_ratio = `female`/`male`
+  )
+```
+
+```{r loading_wage_gap}
+# And now, the same for wage gap data
+df_wage_gap <- read.csv(
+  file = file.path(
+    "Data",
+    "Earning gap, OECD",
+    "earning gap.csv"), 
+  sep = ",",
+  header = T,
+  check.names = F
+  )
+# Let's remove some unnecessary data
+df_wage_gap <- select(df_wage_gap, REF_AREA, TIME_PERIOD, OBS_VALUE)
+```
+
+```{r loading_gdp_per_capita}
+df_gdp_per_capita <- read.csv(
+  file = file.path(
+    "Data",
+    "GDP per capita, UN",
+    "gdp_per_capita.csv"), 
+  sep = ",",
+  header = T,
+  check.names = F
+)
+
+# making it tidy
+df_gdp_per_capita <- df_gdp_per_capita %>%
+  pivot_longer(
+  cols = 5:ncol(df_gdp_per_capita),
+  names_to = "year",
+  values_to = "gdp_per_capita"
+  ) %>%
+  mutate(
+    year = as.numeric(
+      regmatches(
+        year, 
+        regexpr(
+          "^\\d{4}",
+          year
+          )
+        )
+      ),
+    gdp_per_capita = as.numeric(
+      regmatches(
+        gdp_per_capita, 
+        regexpr(
+          "^\\d*", 
+          gdp_per_capita)
+        )
+      )
+  ) %>% # removing empty rows and useless columns
+  select(
+    `Country Name`,
+    `Country Code`, 
+    year, 
+    gdp_per_capita
+    ) %>%
+  filter(!is.na(gdp_per_capita), gdp_per_capita > 0)
+
+
+```
+
+#### Maps
+
+All maps were taken from the "rnaturalearth" library.
+
+```{r world_map}
+# Handling geographic data
+
+# First, let's import the SF data for the maps.
+
+map_world <- ne_countries(
+  scale = "large",
+  returnclass = "sf"
+) %>%
+  mutate( # Somaliland and Taiwan are included as independent countries here, but they are not recognized by the UN, so let's include Somaliland in Somalia and Taiwan in China
+    geometry = case_when(
+      adm0_a3 == "SOM" ~ st_union(geometry[sov_a3 %in% c("SOM", "SOL")]),
+      adm0_a3 == "SOL" ~ NA,
+      adm0_a3 == "CHN" ~ st_union(geometry[sov_a3 %in% c("CH1", "TWN")]),
+      adm0_a3 == "TWN" ~ NA,
+      .default = geometry
+    )
+  )
+
+# There's a problem with this dataset! The country codes don't correspond to the ones used in tfr_meta. Let's fix that with the help of a manually set "translation" table.
+
+country_code_translation_table <- data.frame(
+  sov_a3 = 
+    c("GB1", "CH1", "IS1", "SDS", "FR1", "NL1", "KA1", "FI1",
+      "KOS", "DN1", "CU1", "US1", "CYN", "CNM", "AU1", "NZ1"),
+             
+  Country_Code = 
+    c("GBR", "CHN", "ISR", "SSD", "FRA", "NLD", "KAZ", "FIN", 
+      "XKX", "DNK", "CUB", "USA", "CYP", "CYP", "AUS", "NZL")
+)
+
+# Now, let's add the sov_a3 values for the ones that are different from country codes
+tfr_meta <- tfr_meta %>%
+  left_join(
+    country_code_translation_table,
+    by = c(`Country Code` = "Country_Code")
+)
+tfr_meta <- tfr_meta %>%
+  mutate( # and now we add the values that are the same in both codes
+    sov_a3 = if_else(is.na(sov_a3) | is.null(sov_a3), `Country Code`, sov_a3)
+    )
+
+# Now we can join it with the region data from the UN
+map_world <- map_world %>%
+  left_join(
+    select(
+      tfr_meta,
+      Region,
+      sov_a3,
+      `Country Code`
+    ),
+    by = c("sov_a3" = "sov_a3")
+  )
+
+rm(country_code_translation_table)
+```
+
+```{r ocean}
+# We also need to plot the ocean, so we will plot a rectangle that covers the entire map, that we will plot before everything.
+
+# I'm sorry, I took the code in this cell from StackOverflow https://stackoverflow.com/questions/75860459/change-ocean-color-in-robinson-projection-map, I just couldn't make it work in another way.
+
+# This creates a polygon
+map_ocean <- st_polygon(list(cbind(c(seq(-180, 179, len = 100), rep(180, 100), 
+                        seq(179, -180, len = 100), rep(-180, 100)),
+                      c(rep(-90, 100), seq(-89, 89, len = 100),
+                        rep(90, 100), seq(89, -90, len = 100))))) %>%
+  st_sfc(crs = "WGS84") %>%
+  st_as_sf()
+```
+
+#### Definitions
+
+We first use the original NATO countries as a subset that could be interesting, since it narrows down the level of development and political system.
+
+```{r definitions}
+# Defining nato founding members
+def_nato <- c(   
+  "BEL",
+  "CAN",   
+  "DNK",   
+  "FRA",   
+  "ISL",   
+  "ITA",   
+  "LUX",   
+  "NLD",   
+  "NOR",   
+  "PRT",   
+  "GBR",   
+  "USA" 
+  )
+```
+
+A color scale is defined below. It won't appear in the .html file.
+
+```{r color_scale}
+color_ocean <- "#CCF"
+
+def_new_regions <- c(
+      "steelblue4",
+      "darkolivegreen4",
+      "firebrick",
+      "gold3",
+      "lightsalmon2",
+      "darkorchid1"
+    )
+```
+
+# Baby Bust
+
+## Justification
+
+During the 20th century, several efforts were made to increase or decrease birth rates; in China, during Mao Zedong’s rule, efforts were made both ways, through banning of contraceptives and a positive public discourse, and through the infamous one-child policy that followed the famines of the Great Leap Forward . Romania, however, had an even more infamous birth policy: decree 770, that mostly banned contraceptives and abortion, which, even if successful in its goal, had terrible economical and social consequences. Nazi Germany gave incentives to newly-wed couples to have children, and had one of the only positive[^1] eugenic breeding programs in history, Lebensborn. Democracies, however, have also meddled with births. For instance, France has promoted fertility since the 1930s with policies like the *Code de la Famille*, which provided financial incentives, extended maternity leave, and subsidized childcare to support larger families. These measures were later modernized to address economic challenges while maintaining a focus on family support. Similarly, Sweden is known for its robust parental leave system and affordable childcare, which aim to balance work and family life.
+
+[^1]:  “Positive”, in the context of eugenics, means the promotion of births for the desirable traits instead of the suppression of undesirable traits.
+
+In fiction, concerns for fertility on a societal level have been explored by incredible works of art. One of them, Zardoz, a movie that features a post-scarcity society living anti-Nietzschean negative-nihilistic lives and that doesn’t have children anymore. Another one is the currently popular Handmaid’s Tale, in which fertility is a major theme, as it explores a world in a crisis caused by low fertility, through the perspective of women enslaved by a theocratic US government to be breeders. And, of course, this list wouldn’t be complete without mentioning Children of Men, about a chaotic, decadent world where no more children are born.
+
+These stories were certainly inspired by the lowering birth rates in the real world. It should be noted that every single developed country today, with the single exception of Israel[^2], has sub-replacement fertility rates, despite most of them having strong social benefits for child-bearing. In this work, I will explore the reasons why these policies have failed, and possible policies that could be more effective while still respecting human dignity and right for choice, exploring the intersection between fertility, wealth, social class, work hours, cost of life, gender inequality, years of education, religion and retirement pensions.
+
+[^2]: Interestingly enough, its counter-example is Iran, an Islamic theocracy with low birth rates, surrounded by theocracies with remarkably high birth rates.
+
+## 1. A Sterile World
+
+```{r first_plot}
+# Filtering data before plotting it
+
+world_tfr <- tfr_raw %>%
+  filter(tfr_raw$`Country Name` == "World")
+  
+
+plot_world <- ggplot(
+  world_tfr,
+  aes(
+    x = year, 
+    y = fertility_rate,
+    group = `Country Code`,
+    color = `Country Name`
+    )
+  ) +
+  geom_line(
+    aes(
+      x = year,
+      y = 2.1,
+      linetype = "Latin America & Caribbean"
+    ),
+    inherit.aes = FALSE
+  ) + 
+  geom_line() +
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by=5),
+    minor_breaks = seq(1960, 2022, by=1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(1, 9, by=1),
+    minor_breaks = seq(0.5, 9, by=0.5),
+    limits = c(min(tfr_raw$fertility_rate), max(tfr_raw$fertility_rate))
+  ) +
+  scale_color_manual(
+    values = c("World" = "steelblue"),
+    name = "Weighted average of TFR"
+  ) +
+  scale_linetype_manual(
+    values = c("Latin America & Caribbean" = "dashed"),
+    name = "",
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 1961.5,
+      y = 1.75
+    ),
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate", 
+    color = "black",
+    size = 3,
+    alpha = 0.5
+    ) +
+  guides(
+    linetype = guide_legend(
+      order = 2,
+      label.theme = element_text(color = "white"),
+      override.aes = list(alpha = 0)
+      ),
+    color = guide_legend(order = 1),
+  ) + 
+  labs(
+    title = "General TFR",
+    subtitle = "Expected lifetime births per adult woman (1960-2022)",
+    y = "Number of expected children per woman",
+    x = "Year"
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+
+rm(world_tfr)
+```
+
+As previously stated, we can see that fertility rates have been dropping in the entire world for a long time, as we can see in the figure below.
+
+The situation doesn't look so dire, as the world is still above replacement level with a TFR around 2.3 in 2022. However, that doesn't tell us the full picture. If we divide by region, as in the following figure, we can see that every region of the world except for the MENA and South Asia (which are roughly in equilibrium) and Subsaharan Africa (which is well above replacement rate) are very much below replacement rate.
+
+```{r filtering__to_standard_regions}
+# Filtering data to remove rows for regions instead of countries before plotting it
+tfr_only_countries <- tfr_raw %>%
+  group_by(Region) %>%
+  filter(n_distinct(`Country Name`) > 1) %>%
+  ungroup()
+# We won't need it anymore
+rm(tfr_raw)
+```
+
+```{r countries_and_regions}
+# And now we plot it
+plot_regions <- ggplot(
+  tfr_only_countries,
+  aes(
+    x = year, 
+    y = fertility_rate,
+    group = `Country Code`,
+    color = Region
+    )
+  ) +
+  geom_line( # Lines for individual countries
+    alpha = 0.06,
+    linewidth = 0.08
+    ) +
+  geom_line( # Lines on the background of the regions
+    data = filter(tfr_only_countries, Region == `Country Name`),
+    color = "white",
+    linewidth = 2,
+    alpha = 0.6
+  ) +
+  geom_line( # Lines for the regions
+    data = filter(tfr_only_countries, Region == `Country Name`)
+  ) +
+  geom_line(
+    aes(
+      x = year,
+      y = 2.1
+    ),
+    linetype = "dashed",
+    inherit.aes = FALSE
+  ) + 
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by=5),
+    minor_breaks = seq(1960, 2022, by=1)
+  ) + 
+  scale_y_continuous(
+    breaks = seq(1, 9, by=1),
+    minor_breaks = seq(0.5, 9, by=0.5)
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 1961.5,
+      y = 1.75
+    ),
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate", 
+    color = "black",
+    size = 3,
+    alpha = 0.5
+    ) +
+  guides(
+    linetype = guide_legend(order = 1),
+    color = guide_legend(order = 2)
+  ) + 
+  labs(
+    title = "General TFR",
+    subtitle = "Expected lifetime births per adult woman (1960-2022)",
+    y = "Number of expected children per woman",
+    x = "Year"
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+```
+
+::: panel-tabset
+```{r tabset_tfr_world_vs_regions, results='asis', echo=FALSE}
+
+cat("### World\n\n")
+print(plot_world)
+cat('\n\n')
+cat("### Regions\n\n")
+print(plot_regions)
+cat('\n\n')
+rm(plot_world)
+rm(plot_regions)
+```
+:::
+
+These countries have been in a state of aging ever since the world wars, and many of them rely heavily on immigration, while others experience economic stagnation. Some of them have ridiculously low TFR. South Korea, in special, has around 0.7 children per women. That is a population that will be more than halved every generation and, needless to say, this isn't sustainable on the long run.
+
+## 2. Is it Gender Equality?
+
+It is a common argument by people on both ends of the political spectrum (even if commemorated by one side and lamented by the other) that one of the causes is female emancipation and cultural changes on gender expectations.
+
+However, it might be interesting to investigate this claim further.
+
+### 2.1 Education Inequality
+
+First, let's plot some of these stats against fertility rates. We'll use each observation independently, irrespective of country, to see the relation between gender inequality in education in fertility.
+
+```{r education_inequality}
+# First, we must add these as metrics to our tfr table.
+
+# joining schooling with TFR table:
+tfr_schooling <- tfr_only_countries %>%
+  inner_join(df_expected_schooling, by = c("year" = "Year", "Country Code"))
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(schooling_female_male_ratio, 2), data = na.omit(tfr_schooling))
+
+tfr_schooling <- na.omit(tfr_schooling) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_schooling,
+  aes(
+    x = schooling_female_male_ratio,
+    y = fertility_rate
+  )) +
+  geom_point(
+    size = 0.3,
+    alpha = 0.3,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  geom_hline(
+    aes(
+      yintercept = 2.1
+    ),
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 0.45,
+      y = 1.75
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate",
+    size = 3,
+    ) +
+  geom_vline(
+    aes(
+      xintercept = 1
+    ),
+    color = "gold4",
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1.03,
+      y = 11.9
+    ),
+    angle = 270, 
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "gender equality",
+    size = 3
+    ) +
+  labs(
+    title = "TFR vs education gender inequality rate",
+    y = "Total fertility rate",
+    x = "Female/Male expected years of education ratio"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = schooling_female_male_ratio
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 1.5,
+      y = 11.875
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0))
+  )
+
+```
+
+As r-square is above 0.5, we can confidently say that female education is fairly correlated to low birth rates. We must not forget, however, that correlation is **not** causation, and that more equitable levels of female education are still strongly correlated with wealth, industrialization and education in general.
+
+Let's repeat the same process only with NATO founding members (so as to compare more similar societies that went through similar economic and political processes), to see if we can observe anything interesting!
+
+```{r education_inequality_nato}
+# Filtering by NATO founding members
+nato_tfr <- filter(
+  tfr_schooling, 
+  `Country Code` %in% def_nato,
+  )
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(schooling_female_male_ratio, 2), data = na.omit(nato_tfr))
+
+nato_tfr <- na.omit(nato_tfr) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+ggplot(
+  data = nato_tfr,
+  aes(
+    x = schooling_female_male_ratio,
+    y = fertility_rate
+    )
+  ) +
+  geom_point(
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  labs(
+    title = "TFR vs education gender inequality rate",
+    subtitle = "(NATO founders only)",
+    y = "Total fertility rate",
+    x = "Female/Male expected years of education ratio"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = schooling_female_male_ratio
+    ),
+    color = "red"
+  ) +
+  geom_hline(
+    aes(
+      yintercept = 2.1
+    ),
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1.053,
+      y = 2.155
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate",
+    size = 3,
+    ) +
+  geom_vline(
+    aes(
+      xintercept = 1
+    ),
+    color = "gold4",
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1.006,
+      y = 2.9
+    ),
+    angle = 270, 
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "gender equality",
+    size = 3
+    ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 1.125,
+      y = 2.875
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+rm(tfr_schooling)
+rm(nato_tfr)
+```
+
+Now, not only the relationship stopped being a downwards trend, but we can observe that the r-squared value became much smaller, indicating that if you take only educated, western and industrialized countries, the relationship goes away, and suggesting that the real cause is something else.
+
+Let's first examine other two indicators of gender equality.
+
+### 2.2 Labour participation inequality
+
+First, female participation in the labour market
+
+```{r participation_inequality}
+# joining labour participation with TFR table:
+tfr_labour <- tfr_only_countries %>%
+  inner_join(df_labour_participation, by = c("year" = "Year", "Country Code"))
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(labour_female_male_ratio, 2), data = na.omit(tfr_labour))
+
+tfr_labour <- na.omit(tfr_labour) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_labour,
+  aes(
+    x = labour_female_male_ratio,
+    y = fertility_rate
+  )) +
+  geom_point(
+    size = 0.3,
+    alpha = 0.3,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  labs(
+    title = "TFR vs labour participation gap",
+    y = "Total fertility rate",
+    x = "Female labour participation fraction of male labour participation"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = labour_female_male_ratio
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 0.075,
+      y = 8.5
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  geom_hline(
+    aes(
+      yintercept = 2.1
+    ),
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 0.025,
+      y = 1.85
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate",
+    size = 3,
+    ) +
+  geom_vline(
+    aes(
+      xintercept = 1
+    ),
+    color = "gold4",
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1.03,
+      y = 4.98
+    ),
+    angle = 270, 
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "gender equality",
+    size = 3
+    ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+```
+
+Now we've got an even lower relation!
+
+Not only R squared is much lower (almost completely random), but the model isn't even clearly getting larger or smaller values!
+
+Just to be sure, let's see what happens if we repeat the "NATO method"
+
+```{r participation_inequality_nato}
+# filtering:
+tfr_labour_nato <- tfr_labour %>%
+  filter(
+    `Country Code` %in% def_nato
+  )
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(labour_female_male_ratio, 2), data = na.omit(tfr_labour_nato))
+
+tfr_labour_nato <- na.omit(tfr_labour_nato) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_labour_nato,
+  aes(
+    x = labour_female_male_ratio,
+    y = fertility_rate
+  )) +
+  geom_point(
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  labs(
+    title = "TFR vs labour participation gap",
+    subtitle = "(NATO founders only)",
+    y = "Total fertility rate",
+    x = "Female labour participation fraction of male labour participation"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = labour_female_male_ratio
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 0.575,
+      y = 2.1875
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  geom_hline(
+    aes(
+      yintercept = 2.1
+    ),
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 0.64,
+      y = 2.15
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate",
+    size = 3,
+    ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+rm(tfr_labour)
+rm(tfr_labour_nato)
+```
+
+Interestingly, the relation suggested is a *positive* relationship between female labour and fertility. But even though R-squared has increased, it is still quite low and it suggests that we should disregard this relationship.
+
+### 2.3 Wage Gap
+
+As a final investigation in the relationship between gender inequality and TFR in this document, we will repeat the same process with the wage gap.
+
+```{r wage_gap}
+# joining wages with TFR table:
+tfr_wages <- tfr_only_countries %>%
+  inner_join(df_wage_gap, by = c("year" = "TIME_PERIOD", "Country Code" = "REF_AREA"))
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(OBS_VALUE, 2), data = na.omit(tfr_wages))
+
+tfr_wages <- na.omit(tfr_wages) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_wages,
+  aes(
+    x = OBS_VALUE,
+    y = fertility_rate
+  )) +
+  geom_point(
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  labs(
+    title = "TFR vs Wage Gaps",
+    y = "Total fertility rate",
+    x = "Gap as a percentage of male wages"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = OBS_VALUE
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 45,
+      y = 2.875
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  geom_hline(
+    aes(
+      yintercept = 2.1
+    ),
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 31,
+      y = 2.18
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "replacement rate",
+    size = 3,
+    ) +
+  geom_vline(
+    aes(
+      xintercept = 0
+    ),
+    color = "gold4",
+    linetype = "dashed"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1.3,
+      y = 2.7
+    ),
+    angle = 270, 
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    hjust = 0,
+    inherit.aes = F,
+    label = "gender equality",
+    size = 3
+    ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  )
+rm(tfr_wages)
+```
+
+Again a low R-squared value, indicating this relationship isn't significant.
+
+Since all samples are already western (or westernized) capitalist countries with modern economies that already share very similar societies and ways of life, there is no need to apply "the NATO method".
+
+### 2.4 So, is it?
+
+Considering the low R values for all relationships but education, it is unlikely people are not having more children as a result solely of gender equality, and it is more likely the correlation is in education and not in the social status of women.
+
+## 3. Education and Fertility
+
+Considering the results above, maybe we should examine the impacts of education on tfr a little more closely.
+
+If we analyse men and women separately and draw lines of reference for replacement fertility at 2.1 children per woman and for expected high school completion in 13 years of expected education, we can see the following:
+
+```{r education_by_sex}
+# joining education with TFR table:
+tfr_education <- tfr_only_countries %>%
+  inner_join(df_expected_schooling, by = c("year" = "Year", "Country Code"))
+
+# Pre-fitting the linear model and saving the result
+model_poly_male <- lm(fertility_rate ~ poly(male, 2), data = na.omit(tfr_education))
+
+model_poly_female <- lm(fertility_rate ~ poly(female, 2), data = na.omit(tfr_education))
+
+tfr_education <- na.omit(tfr_education) %>%
+  mutate(
+    predicted_male = predict(model_poly_male),
+    predicted_female = predict(model_poly_female))
+
+# Extract R-squared value
+r_squared_male <- summary(model_poly_male)$r.squared
+r_squared_female <- summary(model_poly_female)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_education,
+  aes(
+    y = fertility_rate
+  )) +
+  geom_point(
+    aes(
+      x = male
+    ),
+    size = 0.3,
+    alpha = 0.1,
+    na.rm = T,
+    color = "steelblue4",
+    key_glyph='rect'
+  ) +
+  geom_point(
+    aes(
+      x = female
+    ),
+    size = 0.3,
+    alpha = 0.1,
+    na.rm = T,
+    colour = "deeppink2"
+  ) + 
+  labs(
+    title = "TFR vs expected years of education",
+    y = "Total fertility rate",
+    x = "expected years of education",
+    color = "Sex"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_male,
+      x = male
+    ),
+    color = "white", # white line for better contrast
+    alpha = 0.6,
+    linewidth = 2
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_male,
+      x = male,
+      color = "Male"
+    ),
+    key_glyph ='rect'
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_female,
+      x = female
+    ),
+    color = "white", # white line for better contrast
+    alpha = 0.6,
+    linewidth = 2
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_female,
+      x = female,
+      color = "Female"
+    ),
+    key_glyph='rect'
+  ) +
+  scale_y_continuous(
+    breaks = seq(1, 9, by=1),
+    minor_breaks = seq(0.5, 9, by=0.5)
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 15.3,
+      y = 8.75
+    ),
+    hjust = 0,
+    label = paste0("R² for male model = ", round(r_squared_male, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 15.3,
+      y = 8.25
+    ),
+    hjust = 0,
+    label = paste0("R² for female model = ", round(r_squared_female, 3)),
+    size = 3.5, 
+    color = "red"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Male" = "deepskyblue4",
+      "Female" = "deeppink3"
+    )
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    # Making everything more clean
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.position = "inside",
+    legend.position.inside = c(0.9, 0.5),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  ) +
+  guides(
+    color = guide_legend(
+      keyheight = 1, 
+      keywidth = 1
+      )
+    ) +
+  # a line for the replacement levels
+  geom_hline(
+    yintercept = 2.1,
+    color = "black",
+    linetype = "dashed"
+    ) +
+   # and another one for high school completion
+  geom_vline(
+    xintercept = 13,
+    color = "gold4",
+    linetype = "dashed"
+  ) +
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 2.5,
+      y = 2.4
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    label = "replacement rate", 
+    size = 3
+    ) +
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 13.5,
+      y = 8
+    ),
+    color = "gray60",
+    alpha = 0.7,
+    label.size = NA,
+    label = "high school years",
+    size = 3,
+    angle = 270
+    )
+
+rm(tfr_education)
+rm(model_poly_male)
+rm(model_poly_female)
+rm(r_squared_male)
+rm(r_squared_female)
+
+```
+
+Now we can see some interesting things;
+
+First, that higher female education is unsurprisingly more closely related to low fertility than male education. We could also probably assume that male education is to a great degree related to fertility only because it follows female education so closely.
+
+In second place, and probably most interesting, it seems there is a very sharp decline after completion of high school. In fact, it appears that around 13 or so expected years of study there is a sharp drop in fertility and that this single factor is the most important, while further years of study don't affect it so much.
+
+It would be interesting, however, to filter the richer, more developed countries, and focus in time-places that have already universalized school access as it is unthinkable to advocate for a policy of abolishing universal education.
+
+```{r education_by_sex_nato}
+# joining education with TFR table:
+tfr_education <- tfr_only_countries %>%
+  inner_join(
+    df_expected_schooling, 
+    by = c(
+      "year" = "Year", 
+      "Country Code")
+    ) %>%
+  filter(
+    `Country Code` %in% def_nato
+  )
+
+# Pre-fitting the linear model and saving the result
+model_poly_male <- lm(fertility_rate ~ poly(male, 2), data = na.omit(tfr_education))
+
+model_poly_female <- lm(fertility_rate ~ poly(female, 2), data = na.omit(tfr_education))
+
+tfr_education <- na.omit(tfr_education) %>%
+  mutate(
+    predicted_male = predict(model_poly_male),
+    predicted_female = predict(model_poly_female))
+
+# Extract R-squared value
+r_squared_male <- summary(model_poly_male)$r.squared
+r_squared_female <- summary(model_poly_female)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_education,
+  aes(
+    y = fertility_rate
+  )) +
+  geom_point(
+    aes(
+      x = male
+    ),
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T,
+    color = "steelblue4",
+    key_glyph='rect'
+  ) +
+  geom_point(
+    aes(
+      x = female
+    ),
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T,
+    colour = "deeppink2"
+  ) + 
+  labs(
+    title = "TFR vs expected years of education",
+    subtitle = "(NATO founders only)",
+    y = "Total fertility rate",
+    x = "expected years of education",
+    color = "Sex"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_male,
+      x = male
+    ),
+    color = "white", # white line for better contrast
+    alpha = 0.6,
+    linewidth = 2
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_male,
+      x = male,
+      color = "Male"
+    ),
+    key_glyph ='rect'
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_female,
+      x = female
+    ),
+    color = "white", # white line for better contrast
+    alpha = 0.6,
+    linewidth = 2
+  ) + 
+  geom_line(
+    aes(
+      y = predicted_female,
+      x = female,
+      color = "Female"
+    ),
+    key_glyph='rect'
+  ) +
+  scale_y_continuous(
+    breaks = seq(1, 3.5, by=1),
+    minor_breaks = seq(0.5, 3.5, by=0.5)
+  ) +
+  scale_x_continuous(
+    breaks = seq(9, 21, by=2),
+    minor_breaks = seq(9, 21, by=1)
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 15.25,
+      y = 2.75
+    ),
+    hjust = 0,
+    label = paste0("R² for male model = ", round(r_squared_male, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 15.25,
+      y = 2.875
+    ),
+    hjust = 0,
+    label = paste0("R² for female model = ", round(r_squared_female, 3)),
+    size = 3.5, 
+    color = "red"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Male" = "deepskyblue4",
+      "Female" = "deeppink3"
+    )
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    # Making everything more clean
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.position = "inside",
+    legend.position.inside = c(0.883, 0.83),
+  ) +
+  guides(
+    color = guide_legend(
+      keyheight = 1, 
+      keywidth = 1
+      )
+    ) +
+  # a line for the replacement levels
+  geom_hline(
+    yintercept = 2.1,
+    color = "black",
+    linetype = "dashed"
+    ) +
+   # and another one for high school completion
+  geom_vline(
+    xintercept = 13,
+    color = "gold4",
+    linetype = "dashed"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 9,
+      y = 2.5
+    ),
+    label = "replacement rate", 
+    color = "black",
+    size = 3,
+    alpha = 0.5
+    ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 13.2,
+      y = 2.6
+    ),
+    label = "high school years", 
+    color = "black",
+    size = 3,
+    alpha = 0.5,
+    angle = 270
+    )
+
+rm(tfr_education)
+rm(model_poly_male)
+rm(model_poly_female)
+rm(r_squared_male)
+rm(r_squared_female)
+rm(def_nato)
+```
+
+Very interestingly, after we use the "NATO method", the relationship goes away almost completely. In the previous plot, we could already observe that fertility was more or less stable after the threshold of 13 expected years of education.
+
+## 4. Financial Wealth
+
+Intuitively, most people associate wealth with low fertility. Stereotypes about the lower class or poorer countries having many children while the better-off do not. This is an interesting hypothesis to investigate, and we will plot it.
+
+```{r gdp_per_capita}
+# joining education with GDP per capita table:
+tfr_gdp_per_capita <- tfr_only_countries %>%
+  inner_join(df_gdp_per_capita, by = c("year", "Country Code"))
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(log(gdp_per_capita, 10), 2), data = na.omit(tfr_gdp_per_capita))
+
+tfr_gdp_per_capita <- na.omit(tfr_gdp_per_capita) %>%
+  mutate(predicted = predict(model_poly))
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+ggplot(
+  tfr_gdp_per_capita,
+  aes(
+    x = gdp_per_capita,
+    y = fertility_rate
+  )) +
+  geom_point(
+    size = 0.2,
+    alpha = 0.3,
+    na.rm = T,
+    colour = "steelblue4"
+  ) + 
+  labs(
+    title = "TFR vs GDP per capita",
+    y = "Total fertility rate",
+    x = "GDP per capita (in current USD)"
+  ) + 
+  geom_line(
+    aes(
+      y = predicted,
+      x = gdp_per_capita
+    ),
+    color = "white", # CONTRAST LINE
+    linewidth = 2,
+    alpha = 0.6
+  ) +
+  geom_line(
+    aes(
+      y = predicted,
+      x = gdp_per_capita
+    ),
+    color = "red"
+  ) +
+  scale_y_continuous(
+    breaks = seq(1, 10, by=1),
+    minor_breaks = seq(0.5, 10, by=0.5)
+  ) +
+  scale_x_log10(
+    labels = scales::label_number(
+      suffix = " USD"
+    )
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 31622.7766,
+      y = 9.5
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray")
+  )
+rm(tfr_gdp_per_capita)
+rm(model_poly)
+rm(r_squared)
+```
+
+Here, we also see a relatively high correlation between GDP per capita and TFR. But the distribution is still very similar to the distribution of education vs TFR. This raises suspicions about this method: can we really universalize such measures? Are the effects of wealth and education similar in Saudi Arabia and the Netherlands? The "NATO method" used until now has shown that whenever we restrict our observations to the founders of NATO, we observe a great reduction of the predicting power of the factors in question. Even in the last figures of education we can observe that the highest observed TFR value for a NATO country (3 children per woman) is still considerably lower than the model prediction for its corresponding years of education and most of the observations around that education range. This issue raises a concern that all of these distributions might reflect region, culture and civilization instead of the factors directly plotted.
+
+## 5. Culture
+
+In order to get better, culture-adjusted models, we must first define our cultures. The UN has already grouped different regions in its metadata, and these regions were utilized in the second figure.
+
+```{r world_bank_map}
+
+ggplot() +
+  geom_sf( # Plotting a blue background for the ocean
+    data = map_ocean,
+    fill = color_ocean,
+    alpha = 0.7
+  ) +
+  geom_sf(
+    data = map_world,
+    fill = "white" # I'm giving every landmass a white background, so that it appears in case the region is "NA", while not putting "NA" in the legend.
+  ) +
+  geom_sf(
+    data = map_world,
+    aes(
+      fill = Region
+      )
+  ) +
+  scale_fill_discrete(
+    na.translate = FALSE
+  ) +
+  scale_x_continuous(
+    breaks = seq (-180, 180, by = 30)
+  ) +
+  scale_y_continuous(
+    breaks = seq (-90, 90, by = 30)
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      margin = margin(b = 10)),
+    # Making everything more clean
+    panel.background = element_rect(fill = NA),
+    panel.grid.major = element_line(colour = "steelblue2"),
+    panel.grid.minor = element_line(colour = "steelblue", linewidth = 0.5),
+    legend.background = element_rect(fill = "#EEE", colour = "black"),
+    legend.title = element_blank(),
+    legend.position = "inside",
+    legend.position.inside = c(0.15, 0.2),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.5, "line"),
+    plot.margin = margin(0, 0, 0, 0),
+    axis.ticks = element_blank(),
+    axis.text = element_blank()
+  ) +
+  labs(
+    title = "Regions of the World according to UN definitions"
+  )+
+  coord_sf(
+    crs = "+proj=robin",
+    expand = FALSE
+  )
+```
+
+These, as you can probably notice, are merely geographical descriptors and aren't very helpful to make it more specific. Does fertility work the same way in Australia and in Papua New Guinea? Or in Britain and Poland?
+
+Let's restrict our study and categorize these societies in a more useful way.
+
+Since we could reasonably infer from the previous visualizations that underdeveloped countries have their fertility reduced by the universalization of high-school-level education and that Europe and East Asia have the lowest TFRs in the world, we will prioritize the global north in this study, and therefore pay special attention to the following countries:
+
+```{r new_regions}
+# defining the new regions
+anglosphere <- c(
+  "CAN",
+  "AUS",
+  "NZL",
+  "GBR",
+  "USA"
+)
+liberal_europe <- c(
+  "AUT",
+  "CHE",
+  "BEL",
+  "NLD",
+  "LUX",
+  "FRA",
+  "ITA",
+  "NOR",
+  "ISL",
+  "DNK",
+  "SWE",
+  "FRO",
+  "FIN"
+)
+soviet_europe <- c(
+  "EST",
+  "LVA",
+  "LTU",
+  "BLR",
+  "MDA",
+  "RUS",
+  "UKR"
+)
+fyr <- c(
+  "BIH",
+  "HRV",
+  "MKD",
+  "MNE",
+  "SRB",
+  "XKX",
+  "SVN"
+)
+warsaw <- c(
+  "BGR",
+  "CZE",
+  "HUN",
+  "POL",
+  "ROU",
+  "SVK"
+)
+east_asia <- c(
+  "JPN",
+  "KOR",
+  "SGP"
+)
+```
+
+```{r joining_new_regions}
+# Now we add it to the tfr_only_countries table
+tfr_only_countries <- tfr_only_countries %>% 
+  mutate(
+    NewRegion = case_when(
+      `Country Code` %in% anglosphere ~ "Anglosphere",
+      `Country Code` %in% liberal_europe ~ "Western Europe",
+      `Country Code` %in% soviet_europe ~ "Ex-Soviet Europe",
+      `Country Code` %in% warsaw ~ "Warsaw Pact",
+      `Country Code` %in% fyr ~ "Former Yugoslavia",
+      `Country Code` %in% east_asia ~ "East Asia",
+      )
+    ) %>%
+  mutate(
+    NewRegion = as.factor(NewRegion)
+  )
+# And let's update the "world" sf as well
+map_world <- map_world %>% 
+  mutate(
+    NewRegion = case_when(
+      `Country Code` %in% anglosphere ~ "Anglosphere",
+      `Country Code` %in% liberal_europe ~ "Western Europe",
+      `Country Code` %in% soviet_europe ~ "Ex-Soviet Europe",
+      `Country Code` %in% warsaw ~ "Warsaw Pact",
+      `Country Code` %in% fyr ~ "Former Yugoslavia",
+      `Country Code` %in% east_asia ~ "East Asia",
+      )
+    ) %>%
+  mutate(
+    NewRegion = as.factor(NewRegion)
+  )
+
+
+# Let's delete these
+rm(anglosphere)
+rm(liberal_europe)
+rm(soviet_europe)
+rm(fyr)
+rm(warsaw)
+rm(east_asia)
+```
+
+```{r my_map}
+
+
+ggplot() +
+  geom_sf( # Plotting a blue background for the ocean
+    data = map_ocean,
+    fill = color_ocean,
+    alpha = 0.7
+  ) +
+  geom_sf(
+    data = map_world,
+    fill = "gray80" # Now it will be gray, as it's not mainly representing Antarctica and I want people to pay less attention to the gray areas
+  ) +
+  geom_sf(
+    data = map_world,
+    aes(
+      fill = NewRegion
+      )
+  ) +
+  scale_fill_manual(
+    values = def_new_regions,
+    na.translate = FALSE
+  ) +
+  scale_x_continuous(
+    breaks = seq (-180, 180, by = 30)
+  ) +
+  scale_y_continuous(
+    breaks = seq (-90, 90, by = 30)
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      margin = margin(b = 10)),
+    # Making everything more clean
+    panel.background = element_rect(fill = NA),
+    panel.grid.major = element_line(colour = "steelblue2"),
+    panel.grid.minor = element_line(colour = "steelblue", linewidth = 0.5),
+    legend.background = element_rect(fill = "#EEE", colour = "black"),
+    legend.title = element_blank(),
+    legend.position = "inside",
+    legend.position.inside = c(0.15, 0.2),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.5, "line"),
+    plot.margin = margin(0, 0, 0, 0),
+    axis.ticks = element_blank(),
+    axis.text = element_blank()
+  ) +
+  labs(
+    title = "Regions of the World we will explore"
+  )+
+  coord_sf(
+    crs = "+proj=robin",
+    expand = FALSE
+  )
+```
+
+1.  **Anglosphere**
+    1.  CANZUK
+    2.  USA
+2.  **Continental Europe**[^3] (consistently liberal and democratic since the 1960s)
+    1.  Austria
+    2.  BeNeLux
+    3.  France
+    4.  Italy
+    5.  Nordic countries
+    6.  Switzerland
+3.  **Continental Europe** (ex-Soviet republics)
+    1.  Baltic states
+    2.  Belarus
+    3.  Moldova
+    4.  Russia
+    5.  Ukraine
+4.  **Former Yugoslav Republics**
+    1.  Bosnia
+    2.  Croatia
+    3.  Macedonia
+    4.  Montenegro
+    5.  Serbia
+    6.  Slovenia
+    7.  Kosovo
+5.  **Warsaw Pact Countries**[^4](non-Soviet)
+    1.  Bulgaria
+    2.  Czechia
+    3.  Hungary
+    4.  Poland
+    5.  Romania
+    6.  Slovakia
+6.  **Capitalist East Asia**[^5]
+    1.  Japan
+    2.  South Korea
+    3.  Hong Kong
+    4.  Singapore[^6]
+
+[^3]: Germany is excluded because half of it was socialist and that complicates our analysis, since the UN data does not differentiate between the former DDR and the BDR. Portugal, Spain and Greece were dictatorships for much of the 20th century.
+
+[^4]: Here we have to exclude Germany again for the same reason as above. Albania is excluded because it withdrew from the Warsaw Pact and I'm not sure where it fits best.
+
+[^5]: The UN does not recognize Taiwan as an independent country, so unfortunately it is not included in the dataset.
+
+[^6]: Technically not East Asia but only geographically so.
+
+### 5.1 Comparing the new regions
+
+Let's repeat some of the processes we did earlier, but with the new regions.
+
+```{r new_tfr_over_time}
+# let's filter by only the countries with NewRegion values now
+tfr_new_regions <- filter(
+  tfr_only_countries, 
+  !is.na(NewRegion)
+  )
+
+# max value of fertility in this dataset
+max_tfr <- max(tfr_new_regions$fertility_rate)
+
+
+
+# doing the same thing again
+ggplot(
+  tfr_new_regions,
+  aes(
+    x = year, 
+    y = fertility_rate,
+    group = `Country Code`,
+    color = NewRegion
+    )
+  ) +
+  # geom_line(
+  #   alpha = 0.2,
+  #   linewidth = 0.1
+  #   ) +
+  geom_line(
+    data = summarise(
+      group_by(
+        tfr_new_regions,
+        year,
+        NewRegion),
+      'mean_fertility' = mean(fertility_rate, na.rm = TRUE),
+      .groups = "drop"
+      ),
+  aes(
+    x = year, 
+    y = mean_fertility,
+    group = NewRegion,
+    color = NewRegion
+    )
+  ) +
+  geom_line(
+    aes(
+      x = year,
+      y = 2.1,
+      linetype = "Replacement Level"
+    ),
+    inherit.aes = FALSE
+  ) + 
+  scale_linetype_manual(
+    values = c("Replacement Level" = "dashed"),
+    name = ""
+  ) +
+  scale_x_continuous(
+    breaks = seq(1960, 2023, by=5),
+    minor_breaks = seq(1960, 2023, by=1)
+  ) + 
+  scale_y_continuous(
+    breaks = seq(1, max_tfr, by=1),
+    minor_breaks = seq(0.5, max_tfr, by=0.5)
+  ) +
+  scale_colour_manual(
+    values = def_new_regions,
+    na.translate = FALSE
+  ) +
+  guides(
+    linetype = guide_legend(order = 1),
+    color = guide_legend(order = 2)
+  ) + 
+  labs(
+    title = "General TFR (new regions)",
+    subtitle = "Expected lifetime births per adult woman (1960-2022, unweighted average between countries)",
+    y = "Number of expected children per woman",
+    x = "Year",
+    color = "Region",
+    linetype = NA
+  ) +
+  theme(
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.title = element_blank(),
+    legend.spacing = unit(0.5, "cm"),
+    legend.margin = margin(1,1,1,1),
+    legend.position = "inside",
+    legend.position.inside = c(0.9, 0.7)
+  ) + # and now some historical references
+  geom_vline(
+    xintercept = 2008,
+    color = "gray10",
+    linetype = "dotted"
+  ) + 
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 2009,
+      y = 3.5
+    ),
+    inherit.aes = F,
+    label = "2008 financial crisis",
+    color = "gray30",
+    label.size = NA,
+    size = 3,
+    alpha = 0.5,
+    angle = 270
+    ) +
+  geom_vline(
+    xintercept = 1989,
+    color = "gray10",
+    linetype = "dotted"
+  ) +
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1990,
+      y = 3.5
+    ),
+    inherit.aes = F,
+    label = "fall of the Berlin Wall",
+    color = "gray30",
+    label.size = NA,
+    size = 3,
+    alpha = 0.5,
+    angle = 270
+    ) +
+  geom_vline(
+    xintercept = 1968,
+    color = "gray10",
+    linetype = "dotted"
+  ) +
+  geom_label(
+    data = data.frame(),
+    aes(
+      x = 1969,
+      y = 4
+    ),
+    inherit.aes = F,
+    label = "1968 youth protests",
+    color = "gray30",
+    label.size = NA,
+    size = 3,
+    alpha = 0.5,
+    angle = 270
+    )
+```
+
+The first interesting thing we can notice here is that the former Warsaw Pact (including the Soviet Union) already had a relatively low birth rate much before the rest of the world, and also before the sexual revolution of the 1960s.
+
+We can also notice that rates in the anglosphere were considerably higher than those in Western Europe, and much higher than in the Warsaw Pact.
+
+Another very interesting thing is that our east asian group started with the highest TFR and ended the time period with the lowest.
+
+A third interesting thing is that the formerly Yugoslavian countries didn't have their rates visibly affected by the wars of its breakup (although we might investigate this further later).
+
+#### 5.1.1 Education
+
+Let's see how education affects the TFR of the regions selected.
+
+```{r new_education}
+# joining education with TFR table:
+tfr_education <- tfr_new_regions %>%
+  inner_join(
+    select(
+      df_expected_schooling,
+      Year,
+      `Country Code`,
+      total
+    ), 
+    by = c(
+      "year" = "Year", 
+      "Country Code")
+    )
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(total, 2), data = na.omit(tfr_education))
+
+tfr_education <- na.omit(tfr_education) %>%
+  mutate(
+    predicted = predict(model_poly)
+    )
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Plotting them:
+plot_tfr_education <- ggplot(
+  tfr_education,
+  aes(
+    y = fertility_rate
+  )) +
+  geom_point(
+    aes(
+      x = total,
+      color = NewRegion
+    ),
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T
+  ) +
+  labs(
+    title = "TFR vs expected years of education",
+    y = "Total fertility rate",
+    x = "expected years of education"
+  ) + 
+  scale_y_continuous( # DEFINING THE GRID #
+    breaks = seq(1, 5, by=1),
+    minor_breaks = seq(0.5, 5, by=0.5)
+  ) +
+  scale_x_continuous(
+    breaks = seq(9, 23, by=2),
+    minor_breaks = seq(9, 23, by=1)
+  ) +
+  scale_color_manual(
+    values = def_new_regions
+  ) +
+  theme(
+    # Making everything more clean
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.position = "inside",
+    legend.position.inside = c(0.88, 0.8),
+    legend.title = element_blank(),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  ) +
+  guides(
+    color = guide_legend(
+      keyheight = 1, 
+      keywidth = 1,
+      override.aes = list(
+        size = 3, 
+        alpha = 1, 
+        shape = 15
+        )
+      )
+    ) +
+  # a line for the replacement levels
+  geom_hline(
+    yintercept = 2.1,
+    color = "black",
+    linetype = "dashed"
+    ) +
+   # and another one for high school completion
+  geom_vline(
+    xintercept = 13,
+    color = "gold4",
+    linetype = "dashed"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 20.5,
+      y = 2.18
+    ),
+    label = "replacement rate", 
+    color = "black",
+    size = 3,
+    alpha = 0.5
+    ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 13.2,
+      y = 3.6
+    ),
+    label = "high school years", 
+    color = "black",
+    size = 3,
+    alpha = 0.5,
+    angle = 270
+    )
+
+plot_tfr_education_all <- plot_tfr_education  + 
+  geom_line( # Background line for the model
+    aes(
+      y = predicted,
+      x = total
+    ),
+    linewidth = 1.5,
+    alpha = 0.7,
+    color = "white"
+  ) +
+  geom_line( # Now, the model
+    aes(
+      y = predicted,
+      x = total
+    ),
+    color = "red",
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 18,
+      y = 4.3
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  )
+plot_tfr_education_all
+```
+
+This is a very low R² score, which indicates there's barely any relation between education years and fertility (although the entire subset has relatively high expected years of education).
+
+We used different colours for the different regions, and we can observe that not all regions are distributed the same way. In fact, East Asia is specially interesting.
+
+So, let's see how each of the regions is distributed.
+
+```{r new_education_multiple}
+
+# Now we will prepare a plot for every region
+region_plots <- list()
+
+for(region in unique(tfr_new_regions$NewRegion)){
+  # Pre-fitting a new linear model for the region and saving the result
+model_poly <- lm(
+  fertility_rate ~ poly(
+    total, 
+    2
+    ), 
+  data = na.omit(
+    filter(
+      tfr_education,
+      NewRegion == region
+      )
+    )
+  )
+
+tfr_education <- na.omit(tfr_education) %>%
+  mutate(
+    predicted = predict(
+      model_poly,
+      newdata = tfr_education
+      )
+    )
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+region_plots[[region]] <- plot_tfr_education  + 
+  geom_point( # Plotting background points for a less chaotic look
+    data = 
+      filter(
+        tfr_education,
+        NewRegion == region
+      ),
+    aes(
+      x = total,
+      y = fertility_rate
+    ),
+    color = "white",
+    size = 1.8,
+    alpha = 0.5,
+    na.rm = T
+  ) +
+  geom_point(
+    data = 
+      filter(
+        tfr_education,
+        NewRegion == region
+      ),
+    aes(
+      x = total,
+      color = NewRegion
+    ),
+    size = 1,
+    alpha = 1,
+    na.rm = T
+  ) +
+  geom_line( # Background line for the model
+    data = 
+      filter(
+        tfr_education,
+        NewRegion == region
+      ),
+    aes(
+      y = predicted,
+      x = total
+    ),
+    linewidth = 1.5,
+    alpha = 0.7,
+    color = "white"
+  ) +
+  geom_line( # Now, the model
+    data = 
+      filter(
+        tfr_education,
+        NewRegion == region
+      ),
+    aes(
+      y = predicted,
+      x = total
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 18,
+      y = 4.3
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+    labs(
+    title = paste("TFR vs expected years of education (",region,")", sep = ""),
+  )
+}
+
+
+# Removing stuff that is visually polluting my environment list of values and data
+
+rm(r_squared)
+rm(region)
+rm(tfr_education)
+rm(plot_tfr_education)
+
+region_plots[["Entire selection"]] <- plot_tfr_education_all
+
+order <- c(
+  "Entire selection",
+  "East Asia",
+  "Anglosphere",
+  "Western Europe",
+  "Warsaw Pact",
+  "Former Yugoslavia",
+  "Ex-Soviet Europe"
+)
+```
+
+::: panel-tabset
+```{r dynamic_tabset_education, results='asis', echo=FALSE}
+
+for(heading in order){
+  cat("### ", heading, "\n\n")
+  print(region_plots[[heading]])
+  cat('\n\n')
+}
+```
+:::
+
+Here, we can see that the East Asian group is the only one that has a clear relation between education and fertility, with a remarkably high R² value of 0.945! It is still interesting to note that the East Asian group did start with the lowest education levels in our subset, but there is almost no relation at all to be found in the other groups.
+
+#### 5.1.2 Wealth
+
+Let's repeat the process for data on gdp per capita.
+
+```{r new_gdp}
+# joining education with TFR table:
+tfr_wealth <- tfr_new_regions %>%
+  inner_join(
+    select(
+      df_gdp_per_capita,
+      year,
+      `Country Code`,
+      total = gdp_per_capita
+    ), 
+    by = c(
+      "year" = "year", 
+      "Country Code" = "Country Code"
+    )
+  )
+
+# Pre-fitting the linear model and saving the result
+model_poly <- lm(fertility_rate ~ poly(log(total, base = 10), 2), data = na.omit(tfr_wealth))
+
+tfr_wealth <- na.omit(tfr_wealth) %>%
+  mutate(
+    predicted = predict(model_poly)
+    )
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+# Preparing the plot for the repeated process:
+plot_tfr_wealth <- ggplot(
+  tfr_wealth,
+  aes(
+    y = fertility_rate
+  )) +
+  geom_point(
+    aes(
+      x = total,
+      color = NewRegion
+    ),
+    size = 0.3,
+    alpha = 0.5,
+    na.rm = T
+  ) +
+  labs(
+    y = "Total fertility rate",
+    x = "GDP per capita (USD, adjusted for inflation)"
+  ) + 
+  scale_y_continuous( # DEFINING THE GRID #
+    breaks = seq(1, 6, by=1),
+    minor_breaks = seq(0.5, 6, by=0.5)
+  ) +
+  scale_x_log10(
+    labels = scales::label_number(
+      suffix = " USD"
+    )
+  ) +
+  scale_color_manual(
+    values = def_new_regions
+  ) +
+  theme(
+    # Making everything more clean
+    panel.background = element_rect(fill = "white"),
+    panel.grid.minor = element_line(colour = "#EEE"),
+    panel.grid.major = element_line(colour = "gray"),
+    plot.title = element_text(
+      margin = margin(b = 10)),
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.position = "inside",
+    legend.position.inside = c(0.88, 0.8),
+    legend.title = element_blank(),
+    axis.text.x = element_text(margin = margin(t = 0, r = 0, b = 5, l = 0)),
+    axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5))
+  ) +
+  guides(
+    color = guide_legend(
+      keyheight = 1, 
+      keywidth = 1,
+      override.aes = list(
+        size = 3, 
+        alpha = 1, 
+        shape = 15
+        )
+      )
+    ) +
+  # a line for the replacement levels
+  geom_hline(
+    yintercept = 2.1,
+    color = "black",
+    linetype = "dashed"
+    ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 200,
+      y = 2.3
+    ),
+    label = "replacement rate", 
+    color = "black",
+    size = 3,
+    alpha = 0.5
+    )
+
+
+# Now preparing the plot for the general data
+plot_general <- plot_tfr_wealth  + 
+  geom_line( # Background line for the model
+    aes(
+      y = predicted,
+      x = total
+    ),
+    linewidth = 1.5,
+    alpha = 0.7,
+    color = "white"
+  ) +
+  geom_line( # Now, the model
+    aes(
+      y = predicted,
+      x = total
+    ),
+    color = "red",
+    inherit.aes = FALSE
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 5623.41325,
+      y = 5.75
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  labs(
+    title = "TFR vs GDP per capita (Entire selection)",
+  )
+
+# Now we will prepare the plot for every region
+region_plots <- list()
+
+for(region in unique(tfr_new_regions$NewRegion)){
+  # Pre-fitting a new linear model for the region and saving the result
+model_poly <- lm(
+  fertility_rate ~ poly(
+    log(total, 10), 
+    2
+    ), 
+  data = na.omit(
+    filter(
+      tfr_wealth,
+      NewRegion == region
+      )
+    )
+  )
+
+tfr_wealth <- na.omit(tfr_wealth) %>%
+  mutate(
+    predicted = predict(
+      model_poly,
+      newdata = tfr_wealth
+      )
+    )
+
+# Extract R-squared value
+r_squared <- summary(model_poly)$r.squared
+
+region_plots[[region]] <- plot_tfr_wealth  + # Adding it to the region_plots vector
+  geom_point( # Plotting background points for a less chaotic look
+    data = 
+      filter(
+        tfr_wealth,
+        NewRegion == region
+      ),
+    aes(
+      x = total,
+      y = fertility_rate
+    ),
+    color = "white",
+    size = 1.8,
+    alpha = 0.5,
+    na.rm = T
+  ) +
+  geom_point(
+    data = 
+      filter(
+        tfr_wealth,
+        NewRegion == region
+      ),
+    aes(
+      x = total,
+      color = NewRegion
+    ),
+    size = 1,
+    na.rm = T
+  ) +
+  geom_line( # Background line for the model
+    data = 
+      filter(
+        tfr_wealth,
+        NewRegion == region
+      ),
+    aes(
+      y = predicted,
+      x = total
+    ),
+    linewidth = 1.5,
+    alpha = 0.7,
+    color = "white"
+  ) +
+  geom_line( # Now, the model
+    data = 
+      filter(
+        tfr_wealth,
+        NewRegion == region
+      ),
+    aes(
+      y = predicted,
+      x = total
+    ),
+    color = "red"
+  ) +
+  geom_text(
+    data = data.frame(),
+    aes(
+      x = 5623.41325,
+      y = 5.75
+    ),
+    label = paste0("R² = ", round(r_squared, 3)), 
+    size = 3.5, 
+    color = "red"
+  ) +
+  labs(
+    title = paste("TFR vs GDP per capita (",region,")", sep = ""),
+  )
+}
+# Putting the first plot there
+region_plots[["Entire selection"]] <- plot_general
+
+```
+
+::: panel-tabset
+```{r dynamic_tabset_gdp, results='asis', echo=FALSE}
+
+for(heading in order){
+  cat("### ", heading, "\n\n")
+  print(region_plots[[heading]])
+  cat('\n\n')
+}
+```
+:::
+
+Here, we can observe that, despite a relatively low R² value for the general selection, some groups display higher relations between wealth and TFR than others. Three of the groups display R² \>\~= 0.5. East Asia has again the highest value with R² = 893 (very significant in social sciences), surprisingly, the Anglosphere comes in second place with R² = 0.715, and, in third, Western Europe with R² = 0.499.
+
+While one could argue about the visualization of the education data that, as one cannot see a similar pattern on any of the other groups, East Asia's strong relationship between TFR and education could reflect the region's transition to more western lifestyles and values[^7] and that they are not causally related, but the strong relation could be atributed to the passage of time (as the education levels generally consistently increased while the fertility levels generally consistently decreased).
+
+[^7]: There's only the slightest relation between this report and Yukio Mishima's books, but he came to mind and I can't recommend his books enough. One of the recurring themes in his novels is the western influence on Japan, which he explores in novels set both in the Meiji era as in post-war Japan. The Sailor Who Fell From Grace With the Sea features a single mother with a single child who owns a business that sells western imports, which seems relevant to the general theme. Would low fertility rates also be western imports?
+
+We can, however, observe more complex behaviours in Eastern Europe, that went through several serious economic and humanitarian crises due to the end of the Cold War and the general Soviet-kept order in the eastern block, and started the second half of the 20th century with already relatively low TFRs.
+
+## 6. Correlation between factors
+
+It's interesting to note that education and wealth seem to be highly codependent, so maybe we should analize how they're related to each other. We will keep using the same set of countries as in the preceding section.
+
+```{r}
+numerical_data <- tfr_new_regions %>%
+  inner_join(
+    select(
+      df_gdp_per_capita,
+      year,
+      `Country Code`,
+      gdp_per_capita
+    ), 
+    by = c(
+      "year" = "year", 
+      "Country Code" = "Country Code"
+    )
+  ) %>%
+  inner_join(
+    select(
+      df_expected_schooling,
+      Year,
+      `Country Code`,
+      total,
+      schooling_female_male_ratio
+    ), 
+    by = c(
+      "year" = "Year", 
+      "Country Code")
+    ) %>%
+  mutate(
+    log_gdp_pc = log(gdp_per_capita, base = 10)
+  ) %>%
+  select(
+    year,
+    fertility_rate,
+    gdp_per_capita,
+    schooling_female_male_ratio,
+    total,
+    log_gdp_pc
+  )
+
+correlation_matrix <- rcorr(as.matrix(numerical_data))
+
+correlation_matrix <- as.data.frame(correlation_matrix$r) %>%
+  tibble::rownames_to_column(var = "var1") %>%
+  pivot_longer(
+    cols = -var1,
+    names_to = "var2",
+    values_to = "value",
+    values_drop_na = TRUE
+  )
+
+ggplot(
+  correlation_matrix,
+  aes(
+    x = var2,
+    y = factor(
+      var1,
+      levels = c(
+      "year",
+      "total",
+      "schooling_female_male_ratio",
+      "log_gdp_pc",
+      "gdp_per_capita",
+      "fertility_rate"
+      )
+      ),
+    fill = value
+  )) +
+  geom_tile() + 
+  geom_text(
+    aes(
+      label = sprintf("%.2f", value),
+      color = ifelse(value > 0.8, "black", "white")
+    ),
+    hjust = 0.5,
+    vjust = 0.5
+  ) +
+  scale_color_manual(
+    values = c("white", "black"),
+    guide = "none"
+  ) + 
+  scale_fill_gradient2(
+    low = "darkred",
+    mid = "lightgray",
+    high = "darkred"
+  ) +
+  scale_x_discrete(
+    position = "top",
+    labels = c(
+      "year" = "Year",
+      "schooling_female_male_ratio" = "Schooling gender ratio",
+      "total" = "Expected years of education",
+      "log_gdp_pc" = "GDP per capita (log)",
+      "gdp_per_capita" = "GDP per capita",
+      "fertility_rate" = "General fertility rate"
+    )
+  ) +
+  scale_y_discrete(
+    labels = c(
+      "year" = "Year",
+      "schooling_female_male_ratio" = "Schooling gender ratio",
+      "total" = "Expected years of education",
+      "log_gdp_pc" = "GDP per capita (log)",
+      "gdp_per_capita" = "GDP per capita",
+      "fertility_rate" = "General fertility rate"
+    )
+  ) +
+  theme(
+    # Making everything more clean
+    panel.background = element_rect(fill = "white"),
+    panel.grid = NULL,
+    legend.background = element_rect(fill = "gray99", colour = "gray90"),
+    legend.title = element_blank(),
+    plot.title = element_text(
+      margin = margin(b = 10)
+    ),
+    axis.text.x.top = element_text(
+      angle = 15,
+      hjust = 0,
+      margin = margin(
+        t = 0, 
+        r = 0, 
+        b = 5, 
+        l = 0)
+      ),
+    axis.text.y = element_text(
+      margin = margin(
+        t = 0, 
+        r = 3, 
+        b = 0, 
+        l = 5
+        )
+      )
+  ) +
+  labs(
+    y = NULL,
+    x = NULL,
+    title = "Pearson Correlation Matrix between variables"
+  )
+```
+
+We can see here that correlations are generally moderate, but the relation between expected years of education and the base 10 logarithm of GDP per capita is the strongest among the variables that are not generated from the same data (that is, excluding relations such as GDP per capita vs log GDP per capita). This relation of 0.73 between expected years of education and GDP per capita is even higher than the relation of any of the variables with the "year" variable, indicating significance as years of education doesn't seem to be a product of the "spirit of the time", but of pure material prosperity. This also corroborates with the relatively lower relation to the gender imbalance in education (only a value of 0.58), which is especially interesting considering they're highly related to each other (as women are half of the people counted in the total value for expected years of education).
+
+Very curiously, none of the variables have a strong direct relation to fertility, except for the "year" variable, which has a Pearson's correlation value of -0.42.
+
+## Conclusion
+
+Generally speaking, the common sense ideas that the fall in fertility can be attributed to education and wealth is consistent with the data, however, gender equality doesn't seem to be a big factor. Furthermore, if we restrict our focus to the global north, such factors seem to be less significant and further studies are required to identify factors that keep people from having more children in some of the most prosperous regions of the world.
