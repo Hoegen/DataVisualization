@@ -1,5 +1,12 @@
-Report.html binary
-Report_with_embedded_images.html binary
-Data binary
-Report_files binary
 Report.qmd linguist-language=R
+
+Report.html binary
+Report.html linguist-vendored=true
+
+Report_with_embedded_images.html binary
+Report_with_embedded_images.html linguist-vendored=true
+
+Data binary
+
+Report_files binary
+Report_files linguist-vendored=true
